@@ -24,14 +24,6 @@ const (
 	regularization = 0
 	maxIterations = 10000
 
-	enableMomentum = true
-	enableReference = true
-	enableIndex = true
-	enableWeekdays = true
-
-	enableWeekdayFilter = false
-	weekdayFilter = time.Tuesday
-
 	featureHighlightThreshold = 0.0500
 )
 
@@ -44,6 +36,12 @@ type Configuration struct {
 	SplitDate commons.SerializableDate `yaml:"splitDate"`
 	EndDate commons.SerializableDate `yaml:"endDate"`
 	IndexSymbol string `yaml:"indexSymbol"`
+	EnableMomentum bool `yaml:"enableMomentum"`
+	EnableReference bool `yaml:"enableReference"`
+	EnableIndex bool `yaml:"enableIndex"`
+	EnableWeekdays bool `yaml:"enableWeekdays"`
+	EnableWeekdayFilter bool `yaml:"enableWeekdayFilter"`
+	WeekdayFilter commons.SerializableWeekday `yaml:"weekdayFilter"`
 	Assets []Asset `yaml:"assets"`
 }
 
@@ -65,16 +63,16 @@ func analyzeData() {
 	header := []string{
 		"Symbol",
 	}
-	if enableMomentum {
+	if configuration.EnableMomentum {
 		header = append(header, "Momentum")
 	}
-	if enableReference {
+	if configuration.EnableReference {
 		header = append(header, "BTC")
 	}
-	if enableIndex {
+	if configuration.EnableIndex {
 		header = append(header, configuration.IndexSymbol)
 	}
-	if enableWeekdays {
+	if configuration.EnableWeekdays {
 		weekdays := []string{
 			"Monday",
 			"Tuesday",
@@ -115,6 +113,9 @@ func analyzeData() {
 	fmt.Printf("\n")
 	fmt.Printf("IS time range: from %s to %s\n", commons.GetDateString(configuration.StartDate.Time), commons.GetDateString(configuration.SplitDate.Time))
 	fmt.Printf("OOS time range: from %s to %s\n", commons.GetDateString(configuration.SplitDate.Time), commons.GetDateString(configuration.EndDate.Time))
+	if configuration.EnableWeekdayFilter {
+		fmt.Printf("Weekday filter: %s\n", configuration.WeekdayFilter)
+	}
 	fmt.Printf("\n")
 }
 
@@ -169,7 +170,7 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 			continue
 		}
 		nextCloseTimestamp := date.AddDate(0, 0, 1)
-		if enableWeekdayFilter && weekday != weekdayFilter {
+		if configuration.EnableWeekdayFilter && weekday != configuration.WeekdayFilter.Weekday {
 			continue
 		}
 		nextAssetClose, exists := assetMap[nextCloseTimestamp]
@@ -193,16 +194,16 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 		}
 		indexMomentum := getRateOfChange(currentIndexClose, previousIndexClose)
 		dailyFeatures := []float64{}
-		if enableMomentum {
+		if configuration.EnableMomentum {
 			dailyFeatures = append(dailyFeatures, assetMomentum)
 		}
-		if enableReference {
+		if configuration.EnableReference {
 			dailyFeatures = append(dailyFeatures, referenceMomentum)
 		}
-		if enableIndex {
+		if configuration.EnableIndex {
 			dailyFeatures = append(dailyFeatures, indexMomentum)
 		}
-		if enableWeekdays {
+		if configuration.EnableWeekdays {
 			weekdayIndex := (int(weekday) + 6) % daysPerWeek
 			for j := range daysPerWeek {
 				var value float64
