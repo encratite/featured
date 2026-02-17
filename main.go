@@ -52,6 +52,11 @@ type Asset struct {
 
 type timePriceMap map[time.Time]float64
 
+type regressionData struct {
+	cells []string
+	oosR2Score float64
+}
+
 func main() {
 	configuration = commons.LoadConfiguration[Configuration]("yaml/featured.yaml")
 	analyzeData()
@@ -89,9 +94,16 @@ func analyzeData() {
 		"IS R²",
 		"OOS R²",
 	}...)
-	rows := commons.ParallelMap(configuration.Assets, func (a Asset) []string {
+	data := commons.ParallelMap(configuration.Assets, func (a Asset) regressionData {
 		return getRegressionCells(a.Symbol, a.StartDate, referenceMap, indexMap)
 	})
+	rows := [][]string{}
+	oosR2Scores := []float64{}
+	for _, d := range data {
+		rows = append(rows, d.cells)
+		oosR2Scores = append(oosR2Scores, d.oosR2Score)
+	}
+	medianR2Score := commons.Median(oosR2Scores)
 	alignments := []tw.Align{
 		tw.AlignDefault,
 	}
@@ -113,6 +125,7 @@ func analyzeData() {
 	fmt.Printf("\n")
 	fmt.Printf("IS time range: from %s to %s\n", commons.GetDateString(configuration.StartDate.Time), commons.GetDateString(configuration.SplitDate.Time))
 	fmt.Printf("OOS time range: from %s to %s\n", commons.GetDateString(configuration.SplitDate.Time), commons.GetDateString(configuration.EndDate.Time))
+	fmt.Printf("Median OOS R² score: %s\n", commons.FormatPercentage(medianR2Score, 2))
 	if configuration.EnableWeekdayFilter {
 		fmt.Printf("Weekday filter: %s\n", configuration.WeekdayFilter)
 	}
@@ -144,7 +157,7 @@ func loadDailyRecords(symbol string, startDate *commons.SerializableDate, sessio
 	return output
 }
 
-func getRegressionCells(symbol string, startDate *commons.SerializableDate, referenceMap timePriceMap, indexMap timePriceMap) []string {
+func getRegressionCells(symbol string, startDate *commons.SerializableDate, referenceMap timePriceMap, indexMap timePriceMap) regressionData {
 	assetMap := loadDailyRecords(symbol, startDate, true, false)
 	trainingFeatures := [][]float64{}
 	trainingLabels := []float64{}
@@ -260,7 +273,11 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 	addR2Score(isR2Score)
 	oosR2Score := getR2Score(testFeatures, testLabels, model)
 	addR2Score(oosR2Score)
-	return cells
+	data := regressionData{
+		cells: cells,
+		oosR2Score: oosR2Score,
+	}
+	return data
 }
 
 func getRateOfChange(a, b float64) float64 {
