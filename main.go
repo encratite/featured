@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"time"
 
@@ -27,6 +28,9 @@ const (
 	enableReference = true
 	enableIndex = true
 	enableWeekdays = true
+
+	enableWeekdayFilter = false
+	weekdayFilter = time.Tuesday
 
 	featureHighlightThreshold = 0.0500
 )
@@ -56,8 +60,8 @@ func main() {
 }
 
 func analyzeData() {
-	referenceMap := loadDailyRecords(bitcoinSymbol, nil)
-	indexRecords := ohlc.MustReadBarchart(configuration.IndexSymbol, configuration.BarchartDirectory, ohlc.TimeFrameD1)
+	referenceMap := loadDailyRecords(bitcoinSymbol, nil, true, false)
+	indexMap := loadDailyRecords(configuration.IndexSymbol, nil, false, true)
 	header := []string{
 		"Symbol",
 	}
@@ -72,12 +76,13 @@ func analyzeData() {
 	}
 	if enableWeekdays {
 		weekdays := []string{
-			// "Monday",
+			"Monday",
 			"Tuesday",
 			"Wednesday",
 			"Thursday",
 			"Friday",
 			"Saturday",
+			"Sunday",
 		}
 		header = append(header, weekdays...)
 	}
@@ -87,7 +92,7 @@ func analyzeData() {
 		"OOS R²",
 	}...)
 	rows := commons.ParallelMap(configuration.Assets, func (a Asset) []string {
-		return getRegressionCells(a.Symbol, a.StartDate, referenceMap, indexRecords)
+		return getRegressionCells(a.Symbol, a.StartDate, referenceMap, indexMap)
 	})
 	alignments := []tw.Align{
 		tw.AlignDefault,
@@ -113,52 +118,69 @@ func analyzeData() {
 	fmt.Printf("\n")
 }
 
-func loadDailyRecords(symbol string, startDate *commons.SerializableDate) timePriceMap {
-	records := ohlc.MustReadBinance(symbol, configuration.BinanceDirectory, ohlc.TimeFrameH1)
+func loadDailyRecords(symbol string, startDate *commons.SerializableDate, sessionEndFilter bool, barchart bool) timePriceMap {
+	var records []ohlc.Record
+	if barchart {
+		records = ohlc.MustReadBarchart(symbol, configuration.BarchartDirectory, ohlc.TimeFrameD1)
+	} else {
+		records = ohlc.MustReadBinance(symbol, configuration.BinanceDirectory, ohlc.TimeFrameH1)
+	}
 	output := timePriceMap{}
 	for _, record := range records {
 		if startDate != nil && record.Timestamp.Before(startDate.Time) {
 			continue
 		}
-		timeOfDay := commons.GetTimeOfDay(record.Timestamp)
-		if timeOfDay == sessionEnd {
-			date := commons.GetDate(record.Timestamp)
-			output[date] = record.Close
+		if sessionEndFilter {
+			timeOfDay := commons.GetTimeOfDay(record.Timestamp)
+			if timeOfDay == sessionEnd {
+				date := commons.GetDate(record.Timestamp)
+				output[date] = record.Close
+			}
+		} else {
+			output[record.Timestamp] = record.Close
 		}
 	}
 	return output
 }
 
-func getRegressionCells(symbol string, startDate *commons.SerializableDate, referenceMap timePriceMap, indexRecords []ohlc.Record) []string {
-	assetMap := loadDailyRecords(symbol, startDate)
+func getRegressionCells(symbol string, startDate *commons.SerializableDate, referenceMap timePriceMap, indexMap timePriceMap) []string {
+	assetMap := loadDailyRecords(symbol, startDate, true, false)
 	trainingFeatures := [][]float64{}
 	trainingLabels := []float64{}
 	testFeatures := [][]float64{}
 	testLabels := []float64{}
-	for i := 1; i < len(indexRecords); i++ {
-		currentIndexRecord := indexRecords[i]
-		previousIndexRecord := indexRecords[i - 1]
-		if currentIndexRecord.Timestamp.Before(configuration.StartDate.Time) || configuration.EndDate.Before(currentIndexRecord.Timestamp) {
-			continue
-		}
-		currentAssetClose, exists := assetMap[currentIndexRecord.Timestamp]
+	for date := configuration.StartDate.Time; date.Before(configuration.EndDate.Time); date = date.AddDate(0, 0, 1) {
+		weekday := date.Weekday()
+		currentIndexClose, exists := getClosestRecord(date, indexMap)
 		if !exists {
 			continue
 		}
-		previousAssetClose, exists := assetMap[previousIndexRecord.Timestamp]
+		previousDate := date.AddDate(0, 0, -1)
+		previousIndexClose, exists := getClosestRecord(previousDate, indexMap)
 		if !exists {
 			continue
 		}
-		nextCloseTimestamp := currentIndexRecord.Timestamp.AddDate(0, 0, 1)
+		currentAssetClose, exists := assetMap[date]
+		if !exists {
+			continue
+		}
+		previousAssetClose, exists := assetMap[previousDate]
+		if !exists {
+			continue
+		}
+		nextCloseTimestamp := date.AddDate(0, 0, 1)
+		if enableWeekdayFilter && weekday != weekdayFilter {
+			continue
+		}
 		nextAssetClose, exists := assetMap[nextCloseTimestamp]
 		if !exists {
 			continue
 		}
-		currentReferenceClose, exists := referenceMap[currentIndexRecord.Timestamp]
+		currentReferenceClose, exists := referenceMap[date]
 		if !exists {
 			continue
 		}
-		previousReferenceClose, exists := referenceMap[previousIndexRecord.Timestamp]
+		previousReferenceClose, exists := referenceMap[previousDate]
 		if !exists {
 			continue
 		}
@@ -169,7 +191,7 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 		} else {
 			referenceMomentum = 0.0
 		}
-		indexMomentum := getRateOfChange(currentIndexRecord.Close, previousIndexRecord.Close)
+		indexMomentum := getRateOfChange(currentIndexClose, previousIndexClose)
 		dailyFeatures := []float64{}
 		if enableMomentum {
 			dailyFeatures = append(dailyFeatures, assetMomentum)
@@ -181,9 +203,8 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 			dailyFeatures = append(dailyFeatures, indexMomentum)
 		}
 		if enableWeekdays {
-			weekday := nextCloseTimestamp.Weekday()
-			weekdayIndex := (int(weekday) - 1) % daysPerWeek
-			for j := 1; j < daysPerWeek - 1; j++ {
+			weekdayIndex := (int(weekday) + 6) % daysPerWeek
+			for j := range daysPerWeek {
 				var value float64
 				if j == weekdayIndex {
 					value = 1.0
@@ -194,7 +215,7 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 			}
 		}
 		label := getRateOfChange(nextAssetClose, currentAssetClose)
-		if currentIndexRecord.Timestamp.Before(configuration.SplitDate.Time) {
+		if date.Before(configuration.SplitDate.Time) {
 			trainingFeatures = append(trainingFeatures, dailyFeatures)
 			trainingLabels = append(trainingLabels, label)
 		} else {
@@ -262,4 +283,15 @@ func getR2Score(features [][]float64, labels []float64, model *linear.LeastSquar
 	}
 	r2Score := 1.0 - residualSum / totalSum
 	return r2Score
+}
+
+func getClosestRecord(date time.Time, indexMap timePriceMap) (float64, bool) {
+	for range 10 {
+		close, exists := indexMap[date]
+		if exists {
+			return close, true
+		}
+		date = date.AddDate(0, 0, -1)
+	}
+	return math.NaN(), false
 }
