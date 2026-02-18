@@ -4,14 +4,11 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"time"
 
 	"github.com/cdipaolo/goml/linear"
 	"github.com/encratite/commons"
 	"github.com/encratite/ohlc"
-	"github.com/olekukonko/tablewriter"
-	"github.com/olekukonko/tablewriter/tw"
 )
 
 const (
@@ -114,24 +111,8 @@ func analyzeData() {
 		oosR2Scores = append(oosR2Scores, d.oosR2Score)
 	}
 	medianR2Score := commons.Median(oosR2Scores)
-	alignments := []tw.Align{
-		tw.AlignDefault,
-	}
-	for len(alignments) < len(header) {
-		alignments = append(alignments, tw.AlignRight)
-	}
-	tableConfig := tablewriter.WithConfig(tablewriter.Config{
-		Header: tw.CellConfig{
-			Formatting: tw.CellFormatting{AutoFormat: tw.Off},
-			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
-		}},
-	)
-	alignmentConfig := tablewriter.WithAlignment(alignments)
 	fmt.Printf("\n")
-	table := tablewriter.NewTable(os.Stdout, tableConfig, alignmentConfig)
-	table.Header(header)
-	table.Bulk(rows)
-	table.Render()
+	commons.RenderTable(header, rows)
 	fmt.Printf("\n")
 	fmt.Printf("IS time range: from %s to %s\n", commons.GetDateString(configuration.StartDate.Time), commons.GetDateString(configuration.SplitDate.Time))
 	fmt.Printf("OOS time range: from %s to %s\n", commons.GetDateString(configuration.SplitDate.Time), commons.GetDateString(configuration.EndDate.Time))
