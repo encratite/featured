@@ -25,6 +25,8 @@ const (
 	maxIterations = 10000
 
 	featureHighlightThreshold = 0.0500
+
+	weeksPerYear = 52
 )
 
 var configuration *Configuration
@@ -42,6 +44,10 @@ type Configuration struct {
 	EnableWeekdays bool `yaml:"enableWeekdays"`
 	EnableWeekdayFilter bool `yaml:"enableWeekdayFilter"`
 	WeekdayFilter commons.SerializableWeekday `yaml:"weekdayFilter"`
+	HoldingTime int `yaml:"holdingTime"`
+	LongThreshold float64 `yaml:"longThreshold"`
+	ShortThreshold float64 `yaml:"shortThreshold"`
+	RiskFreeRate float64 `yaml:"riskFreeRate"`
 	Assets []Asset `yaml:"assets"`
 }
 
@@ -93,6 +99,10 @@ func analyzeData() {
 		"Intercept",
 		"IS R²",
 		"OOS R²",
+		"Ret (Long)",
+		"SR (Long)",
+		"Ret (Short)",
+		"SR (Short)",
 	}...)
 	data := commons.ParallelMap(configuration.Assets, func (a Asset) regressionData {
 		return getRegressionCells(a.Symbol, a.StartDate, referenceMap, indexMap)
@@ -128,6 +138,9 @@ func analyzeData() {
 	fmt.Printf("Median OOS R² score: %s\n", commons.FormatPercentage(medianR2Score, 2))
 	if configuration.EnableWeekdayFilter {
 		fmt.Printf("Weekday filter: %s\n", configuration.WeekdayFilter)
+	}
+	if configuration.HoldingTime > 1 {
+		fmt.Printf("Holding time: %d days\n", configuration.HoldingTime)
 	}
 	fmt.Printf("\n")
 }
@@ -165,12 +178,15 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 	testLabels := []float64{}
 	for date := configuration.StartDate.Time; date.Before(configuration.EndDate.Time); date = date.AddDate(0, 0, 1) {
 		weekday := date.Weekday()
-		currentIndexClose, exists := getClosestRecord(date, indexMap)
+		if configuration.EnableWeekdayFilter && weekday != configuration.WeekdayFilter.Weekday {
+			continue
+		}
+		currentIndexCloseDate, currentIndexClose, exists := getClosestRecord(date, indexMap)
 		if !exists {
 			continue
 		}
-		previousDate := date.AddDate(0, 0, -1)
-		previousIndexClose, exists := getClosestRecord(previousDate, indexMap)
+		previousIndexCloseDate := currentIndexCloseDate.AddDate(0, 0, -1)
+		_, previousIndexClose, exists := getClosestRecord(previousIndexCloseDate, indexMap)
 		if !exists {
 			continue
 		}
@@ -178,14 +194,12 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 		if !exists {
 			continue
 		}
+		previousDate := date.AddDate(0, 0, -1)
 		previousAssetClose, exists := assetMap[previousDate]
 		if !exists {
 			continue
 		}
-		nextCloseTimestamp := date.AddDate(0, 0, 1)
-		if configuration.EnableWeekdayFilter && weekday != configuration.WeekdayFilter.Weekday {
-			continue
-		}
+		nextCloseTimestamp := date.AddDate(0, 0, configuration.HoldingTime)
 		nextAssetClose, exists := assetMap[nextCloseTimestamp]
 		if !exists {
 			continue
@@ -273,6 +287,24 @@ func getRegressionCells(symbol string, startDate *commons.SerializableDate, refe
 	addR2Score(isR2Score)
 	oosR2Score := getR2Score(testFeatures, testLabels, model)
 	addR2Score(oosR2Score)
+	longReturns, shortReturns := runBacktest(testFeatures, testLabels, model)
+	addReturns := func (returns []float64) {
+		totalReturn, sharpeRatio := analyzeReturns(returns)
+		var totalReturnString, sharpeRatioString string
+		if totalReturn != 0.0 {
+			totalReturnString = commons.FormatPercentage(totalReturn, 2)
+			sharpeRatioString = fmt.Sprintf("%.2f", sharpeRatio)
+		} else {
+			totalReturnString = "-"
+			sharpeRatioString = "-"
+		}
+		cells = append(cells, []string{
+			totalReturnString,
+			sharpeRatioString,
+		}...)
+	}
+	addReturns(longReturns)
+	addReturns(shortReturns)
 	data := regressionData{
 		cells: cells,
 		oosR2Score: oosR2Score,
@@ -288,9 +320,9 @@ func getR2Score(features [][]float64, labels []float64, model *linear.LeastSquar
 	meanObserved := commons.Mean(labels)
 	residualSum := 0.0
 	totalSum := 0.0
-	for i, f := range features {
+	for i := range features {
 		label := labels[i]
-		prediction, err := model.Predict(f)
+		prediction, err := model.Predict(features[i])
 		if err != nil {
 			commons.Fatalf("Prediction failed: %v", err)
 		}
@@ -303,13 +335,63 @@ func getR2Score(features [][]float64, labels []float64, model *linear.LeastSquar
 	return r2Score
 }
 
-func getClosestRecord(date time.Time, indexMap timePriceMap) (float64, bool) {
+func getClosestRecord(date time.Time, indexMap timePriceMap) (time.Time, float64, bool) {
 	for range 10 {
 		close, exists := indexMap[date]
 		if exists {
-			return close, true
+			return date, close, true
 		}
 		date = date.AddDate(0, 0, -1)
 	}
-	return math.NaN(), false
+	return time.Time{}, math.NaN(), false
+}
+
+func runBacktest(features [][]float64, labels []float64, model *linear.LeastSquares) ([]float64, []float64) {
+	longReturns := []float64{}
+	shortReturns := []float64{}
+	for i := range features {
+		prediction, err := model.Predict(features[i])
+		if err != nil {
+			commons.Fatalf("Prediction failed: %v", err)
+		}
+		signal := prediction[0]
+		label := labels[i]
+		// fmt.Printf("signal = %.3f, label = %.3f\n", signal, label)
+		if signal > configuration.LongThreshold {
+			longReturns = append(longReturns, label)
+		} else {
+			longReturns = append(longReturns, 0.0)
+		}
+		if signal < configuration.ShortThreshold {
+			shortReturn := 1.0 / (1.0 + label) - 1.0
+			shortReturns = append(shortReturns, shortReturn)
+		} else {
+			shortReturns = append(shortReturns, 0.0)
+		}
+	}
+	return longReturns, shortReturns
+}
+
+func analyzeReturns(returns []float64) (float64, float64) {
+	totalReturn := 0.0
+	for _, r := range returns {
+		totalReturn += r
+	}
+	sharpeRatio := getSharpeRatio(returns)
+	return totalReturn, sharpeRatio
+}
+
+func getSharpeRatio(weeklyReturns []float64) float64 {
+	if len(weeklyReturns) < 2 {
+		return math.NaN()
+	}
+	meanReturn := commons.Mean(weeklyReturns)
+	stdDev := commons.StdDev(weeklyReturns)
+	riskFreeRate := configuration.RiskFreeRate / weeksPerYear
+	weeklySharpeRatio := (meanReturn - riskFreeRate) / stdDev
+	sharpeRatio := math.Sqrt(weeksPerYear) * weeklySharpeRatio
+	if math.IsInf(sharpeRatio, 1) || math.IsInf(sharpeRatio, -1) {
+		return math.NaN()
+	}
+	return sharpeRatio
 }
